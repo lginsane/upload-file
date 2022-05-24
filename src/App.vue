@@ -99,7 +99,6 @@ async function handleFileChange(e) {
       });
     };
   });
-  return;
   // 上传中
   status.value = 1;
   await uploadFile();
