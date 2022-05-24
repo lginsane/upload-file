@@ -1,12 +1,14 @@
 <script setup>
-import { ref, watch, computed } from "vue";
+import { ref, reactive, watch, computed } from "vue";
 import { ElMessage } from "element-plus";
 import axios from "axios";
 // 切片大小
-const SIZE = 10 * 1024 * 1024;
+const SIZE = 50 * 1024 * 1024;
 const HOST = "http://localhost:8088";
+// 0: 无状态 1: 上传中 2: 完成 3: 暂停
+const status = ref(0);
+const container = ref(null);
 const fileRef = ref(null);
-const fileSize = ref(0);
 const fileChunkList = ref([]);
 // 上传进度
 const fakeUploadPercentage = ref(0)
@@ -14,17 +16,29 @@ const fakeUploadPercentage = ref(0)
 const mergePercentage = ref(0)
 // 总进度条包括: 文件上传进度和文件合并进度
 const allPercentage = computed(() => parseInt((mergePercentage.value + fakeUploadPercentage.value) / 2))
+// 生成 hash 进度
+const hashPercentage = ref(0);
+// 取消上传事件
+const cancelState = reactive({
+  cancel: null,
+  cancelLoading: false
+});
+const CancelToken = axios.CancelToken;
 watch(
   () => fileChunkList.value,
   (val) => {
-    if (!fileChunkList.value.length || !fileSize.value) return 0;
-      const loaded = fileChunkList.value
-        .map(item => item.size * item.percentage)
-        .reduce((acc, cur) => acc + cur);
-      fakeUploadPercentage.value = parseInt((loaded / fileSize.value).toFixed(2));
+    if (!fileChunkList.value.length || !container.value.size) return 0;
+    const loaded = fileChunkList.value
+      .map(item => item.size * item.percentage)
+      .reduce((acc, cur) => acc + cur);
+    fakeUploadPercentage.value = parseInt((loaded / container.value.size).toFixed(2));
+    // 上传完成，关闭暂停
+    if (fakeUploadPercentage.value === 100) {
+      cancelState.cancel = null
+    }
   }, {
-    deep: true
-  })
+  deep: true
+})
 // 触发选择文件
 function handleUpload() {
   fileRef.value.click();
@@ -33,15 +47,47 @@ function handleUpload() {
 async function handleFileChange(e) {
   const file = e.target.files[0];
   if (!file) return;
-  fileSize.value = file.size
+  container.value = file
   fileChunkList.value = createFileChunk(file);
-  await uploadFile(file.name);
-  await mergeRequest(file.name);
+  const fileHash = await createFileHash(
+    fileChunkList.value.map((e) => {
+      return { file: e.chunk };
+    })
+  );
+  fileChunkList.value.forEach((item, i) => {
+    item.fileHash = fileHash
+    item.hash = fileHash + '-' + i
+    item.request = function () {
+      const formData = new FormData();
+      formData.append("chunk", item.chunk);
+      formData.append("hash", item.hash);
+      formData.append("filename", container.value.name);
+      return axios({
+        url: HOST + "/file/upload",
+        method: "post",
+        data: formData,
+        onUploadProgress: (e) => {
+          item.percentage = parseInt(String((e.loaded / e.total) * 100));
+          if (item.percentage === 100) {
+            item.status = 2
+          }
+        },
+        cancelToken: new CancelToken(function executor(c) {
+          cancelState.cancel = c;
+        }),
+      });
+    }
+  })
+  // 上传中
+  status.value = 1
+  await uploadFile();
+  await mergeRequest();
+  status.value = 2
   // 上传成功后格式化
   setTimeout(() => {
     initUpload()
-  }, 1000);
-  
+  }, 800);
+
 }
 // 生成文件切片
 function createFileChunk(file, size = SIZE) {
@@ -64,21 +110,31 @@ function createFileChunk(file, size = SIZE) {
   }
   return fileChunkList;
 }
+// 创建文件对应的唯一 hash
+function createFileHash(fileChunkList) {
+  return new Promise((resolve) => {
+    // 添加 worker 属性
+    const worker = new Worker("/hash.js");
+    worker.postMessage({ fileChunkList });
+    worker.onmessage = (e) => {
+      const { percentage, hash } = e.data;
+      hashPercentage.value = parseInt(percentage);
+      if (hash) {
+        resolve(hash);
+      }
+    };
+  });
+}
 // 上传文件
-async function uploadFile(fileName) {
+async function uploadFile() {
   const requestList = (item) => {
-    const formData = new FormData();
-    formData.append("chunk", item.chunk);
-    formData.append("hash", item.hash);
-    formData.append("filename", fileName);
-    return axios({
-      url: HOST + "/file/upload",
-      method: "post",
-      data: formData,
-      onUploadProgress: (e) => {
-        item.percentage = parseInt(String((e.loaded / e.total) * 100));
-      },
-    });
+    // 上传成功的跳过
+    if (item.status === 2) {
+      return new Promise((resolve) => {
+        setTimeout(() => resolve(true), 500)
+      })
+    }
+    return item.request()
   };
   await asyncPool(3, fileChunkList.value, requestList);
 }
@@ -99,13 +155,13 @@ async function asyncPool(poolLimit, iterable, iteratorFn) {
   return Promise.all(ret);
 }
 // 合并上传切片
-async function mergeRequest(name) {
+async function mergeRequest() {
   await axios({
     url: HOST + "/file/merge",
     method: "post",
     data: {
       size: SIZE,
-      filename: name,
+      filename: container.value.name,
     },
     headers: {
       "content-type": "application/json",
@@ -116,14 +172,42 @@ async function mergeRequest(name) {
     },
   });
 }
+// 暂停
+async function handlePauseOrContinue() {
+  // 处理连续点击
+  if (cancelState.cancelLoading) return
+  cancelState.cancelLoading = true
+  if (status.value === 1) {
+    cancelState.cancel && cancelState.cancel()
+    status.value = 3
+    ElMessage.warning('已暂停')
+    setTimeout(() => cancelState.cancelLoading = false, 200)
+  } else {
+    // 上传中
+    ElMessage.warning('继续上传')
+    status.value = 1
+    await uploadFile();
+    await mergeRequest();
+    status.value = 2
+    setTimeout(() => cancelState.cancelLoading = false, 200)
+    // 上传成功后格式化
+    setTimeout(() => {
+      initUpload()
+    }, 800);
+  }
+
+
+}
 // 格式化
 function initUpload() {
   console.log('-----上传成功------格式化-----')
   fileRef.value.value = null
   fileChunkList.value = []
-  fileSize.value = 0
+  container.value = null
   fakeUploadPercentage.value = 0
   mergePercentage.value = 0
+  hashPercentage.value = 0
+  status.value = 0
   ElMessage.success('上传成功')
 }
 </script>
@@ -132,15 +216,23 @@ function initUpload() {
   <div>
     <input style="display: none" type="file" name="file" ref="fileRef" @change="handleFileChange" />
     <el-button type="primary" @click="handleUpload">选择文件上传</el-button>
+    <el-button type="primary" :disabled="status === 0 || !cancelState.cancel" @click="handlePauseOrContinue">{{ status === 3 ? "继续"
+        : "暂停"
+    }}
+    </el-button>
     <div style="margin-top: 20px;">
-      <div>整个文件的进度条</div>
+      <div>文件的进度条</div>
       <el-progress :percentage="allPercentage"></el-progress>
+    </div>
+    <div style="margin-top: 20px">
+      <div>生成hash进度条</div>
+      <el-progress :percentage="hashPercentage"></el-progress>
     </div>
     <el-table :data="fileChunkList" style="width: 100%; margin-top: 40px" align="center">
       <el-table-column prop="hash" label="chunk hash"></el-table-column>
       <el-table-column prop="size" label="size(KB)">
         <template v-slot="{ row }">
-          <span>{{ parseInt(row.size / 1024)}}</span>
+          <span>{{ parseInt(row.size / 1024) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="percentage">

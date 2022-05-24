@@ -5,10 +5,16 @@ const multiparty = require("multiparty");
 const server = http.createServer();
 const UPLOAD_DIR = path.resolve(__dirname, "..", "target");
 
-const resolvePost = req =>
-  new Promise(resolve => {
+// 提取后缀名
+// get file extension
+const extractExt = filename =>
+  filename.slice(filename.lastIndexOf("."), filename.length);
+
+
+const resolvePost = (req) =>
+  new Promise((resolve) => {
     let chunk = "";
-    req.on("data", data => {
+    req.on("data", (data) => {
       chunk = data;
     });
     req.on("end", () => {
@@ -18,7 +24,7 @@ const resolvePost = req =>
 
 // 写入文件流
 const pipeStream = (path, writeStream) =>
-  new Promise(resolve => {
+  new Promise((resolve) => {
     const readStream = fse.createReadStream(path);
     readStream.on("end", () => {
       fse.unlinkSync(path);
@@ -29,13 +35,11 @@ const pipeStream = (path, writeStream) =>
 
 // 合并切片
 const mergeFileChunk = async (filePath, filename, size) => {
-  const chunkDir = path.resolve(UPLOAD_DIR, 'chunkDir' + filename);
+  const chunkDir = path.resolve(UPLOAD_DIR, "chunkDir" + filename);
   const chunkPaths = await fse.readdir(chunkDir);
   // 根据切片下标进行排序
   // 否则直接读取目录的获得的顺序会错乱
   chunkPaths.sort((a, b) => a.split("-")[1] - b.split("-")[1]);
-  console.log('chunkPaths')
-  console.log(chunkPaths)
   // 并发写入文件
   await Promise.all(
     chunkPaths.map((chunkPath, index) =>
@@ -46,7 +50,6 @@ const mergeFileChunk = async (filePath, filename, size) => {
           start: index * size,
         })
       )
-
     )
   );
   // 合并后删除保存切片的目录
@@ -61,7 +64,7 @@ server.on("request", async (req, res) => {
     res.end();
     return;
   }
-
+  // 文件合并
   if (req.url === "/file/merge") {
     const data = await resolvePost(req);
     const { filename, size } = data;
@@ -70,10 +73,11 @@ server.on("request", async (req, res) => {
     res.end(
       JSON.stringify({
         code: 0,
-        message: "file merged success"
+        message: "file merged success",
       })
     );
   }
+  // 文件上传
   if (req.url === "/file/upload") {
     const multipart = new multiparty.Form();
 
@@ -86,7 +90,7 @@ server.on("request", async (req, res) => {
       const [filename] = fields.filename;
       // 创建临时文件夹用于临时存储 chunk
       // 添加 chunkDir 前缀与文件名做区分
-      const chunkDir = path.resolve(UPLOAD_DIR, 'chunkDir' + filename);
+      const chunkDir = path.resolve(UPLOAD_DIR, "chunkDir" + filename);
 
       if (!fse.existsSync(chunkDir)) {
         await fse.mkdirs(chunkDir);
@@ -98,7 +102,26 @@ server.on("request", async (req, res) => {
       res.end("received file chunk");
     });
   }
-
+  // 文件是否存在校验
+  if (req.url === "/file/verify") {
+    const data = await resolvePost(req);
+    const { fileHash, filename } = data;
+    const ext = extractExt(filename);
+    const filePath = path.resolve(UPLOAD_DIR, `${fileHash}${ext}`);
+    if (fse.existsSync(filePath)) {
+      res.end(
+        JSON.stringify({
+          shouldUpload: false,
+        })
+      );
+    } else {
+      res.end(
+        JSON.stringify({
+          shouldUpload: true,
+        })
+      );
+    }
+  }
 });
 
 server.listen(8088, () => console.log("listening port 8088"));
