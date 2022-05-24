@@ -5,12 +5,6 @@ const multiparty = require("multiparty");
 const server = http.createServer();
 const UPLOAD_DIR = path.resolve(__dirname, "..", "target");
 
-// 提取后缀名
-// get file extension
-const extractExt = filename =>
-  filename.slice(filename.lastIndexOf("."), filename.length);
-
-
 const resolvePost = (req) =>
   new Promise((resolve) => {
     let chunk = "";
@@ -102,12 +96,11 @@ server.on("request", async (req, res) => {
       res.end("received file chunk");
     });
   }
-  // 文件是否存在校验
+  // 校验文件是否存在
   if (req.url === "/file/verify") {
     const data = await resolvePost(req);
-    const { fileHash, filename } = data;
-    const ext = extractExt(filename);
-    const filePath = path.resolve(UPLOAD_DIR, `${fileHash}${ext}`);
+    const { filename } = data;
+    const filePath = path.resolve(UPLOAD_DIR, `${filename}`);
     if (fse.existsSync(filePath)) {
       res.end(
         JSON.stringify({
@@ -118,10 +111,17 @@ server.on("request", async (req, res) => {
       res.end(
         JSON.stringify({
           shouldUpload: true,
+          uploadedList: await createUploadedList(filename)
         })
       );
     }
   }
 });
+
+// 返回已上传的所有切片名
+const createUploadedList = async filename =>
+  fse.existsSync(path.resolve(UPLOAD_DIR, "chunkDir" + filename))
+    ? await fse.readdir(path.resolve(UPLOAD_DIR, "chunkDir" + filename))
+    : [];
 
 server.listen(8088, () => console.log("listening port 8088"));
