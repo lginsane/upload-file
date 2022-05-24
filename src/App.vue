@@ -1,12 +1,30 @@
 <script setup>
-import { ref } from "vue";
+import { ref, watch, computed } from "vue";
+import { ElMessage } from "element-plus";
 import axios from "axios";
 // 切片大小
 const SIZE = 10 * 1024 * 1024;
 const HOST = "http://localhost:8088";
-
 const fileRef = ref(null);
+const fileSize = ref(0);
 const fileChunkList = ref([]);
+// 上传进度
+const fakeUploadPercentage = ref(0)
+// 合并进度
+const mergePercentage = ref(0)
+// 总进度条包括: 文件上传进度和文件合并进度
+const allPercentage = computed(() => parseInt((mergePercentage.value + fakeUploadPercentage.value) / 2))
+watch(
+  () => fileChunkList.value,
+  (val) => {
+    if (!fileChunkList.value.length || !fileSize.value) return 0;
+      const loaded = fileChunkList.value
+        .map(item => item.size * item.percentage)
+        .reduce((acc, cur) => acc + cur);
+      fakeUploadPercentage.value = parseInt((loaded / fileSize.value).toFixed(2));
+  }, {
+    deep: true
+  })
 // 触发选择文件
 function handleUpload() {
   fileRef.value.click();
@@ -15,9 +33,15 @@ function handleUpload() {
 async function handleFileChange(e) {
   const file = e.target.files[0];
   if (!file) return;
+  fileSize.value = file.size
   fileChunkList.value = createFileChunk(file);
   await uploadFile(file.name);
   await mergeRequest(file.name);
+  // 上传成功后格式化
+  setTimeout(() => {
+    initUpload()
+  }, 1000);
+  
 }
 // 生成文件切片
 function createFileChunk(file, size = SIZE) {
@@ -25,15 +49,15 @@ function createFileChunk(file, size = SIZE) {
   let currentSize = 0;
   let i = 0;
   while (currentSize < file.size) {
-    // const bigSize =
-    //   file.size < currentSize + size ? file.size : currentSize + size;
+    const bigSize =
+      file.size < currentSize + size ? file.size : currentSize + size;
     fileChunkList.push({
       chunk: file.slice(currentSize, currentSize + size),
       // 文件名 + 数组下标
       hash: file.name + "-" + i,
       percentage: 0,
       index: i,
-      size: SIZE,
+      size: bigSize - currentSize,
     });
     currentSize += size;
     i++;
@@ -86,44 +110,47 @@ async function mergeRequest(name) {
     headers: {
       "content-type": "application/json",
     },
-    onUploadProgress: (e) => onMergeProgress(e),
+    // 合并进度条
+    onUploadProgress: (e) => {
+      mergePercentage.value = parseInt(String((e.loaded / e.total) * 100))
+    },
   });
 }
-
-// 合并进度条
-function onMergeProgress(e) {
-  console.log("合并进度", parseInt(String((e.loaded / e.total) * 100)));
+// 格式化
+function initUpload() {
+  console.log('-----上传成功------格式化-----')
+  fileRef.value.value = null
+  fileChunkList.value = []
+  fileSize.value = 0
+  fakeUploadPercentage.value = 0
+  mergePercentage.value = 0
+  ElMessage.success('上传成功')
 }
 </script>
 
 <template>
   <div>
-    <input
-      style="display: none"
-      type="file"
-      name="file"
-      ref="fileRef"
-      @change="handleFileChange"
-    />
-    <el-button type="primary" @click="handleUpload">上传</el-button>
-
-    <el-table
-      :data="fileChunkList"
-      style="width: 100%; margin-top: 40px"
-      align="center"
-    >
+    <input style="display: none" type="file" name="file" ref="fileRef" @change="handleFileChange" />
+    <el-button type="primary" @click="handleUpload">选择文件上传</el-button>
+    <div style="margin-top: 20px;">
+      <div>整个文件的进度条</div>
+      <el-progress :percentage="allPercentage"></el-progress>
+    </div>
+    <el-table :data="fileChunkList" style="width: 100%; margin-top: 40px" align="center">
       <el-table-column prop="hash" label="chunk hash"></el-table-column>
-      <el-table-column prop="size" label="size(KB)"> </el-table-column>
+      <el-table-column prop="size" label="size(KB)">
+        <template v-slot="{ row }">
+          <span>{{ parseInt(row.size / 1024)}}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="percentage">
         <template v-slot="{ row }">
-          <el-progress
-            :percentage="row.percentage"
-            color="#909399"
-          ></el-progress>
+          <el-progress :percentage="row.percentage" color="#909399"></el-progress>
         </template>
       </el-table-column>
     </el-table>
   </div>
 </template>
 
-<style></style>
+<style>
+</style>
